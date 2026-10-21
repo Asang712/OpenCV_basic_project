@@ -7,6 +7,12 @@ __pycache__/
 # 运行输出
 output/
 
+# 测试视频 (体积大, 不纳入版本管理)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
 # Editor / OS
 .vscode/
 .idea/
