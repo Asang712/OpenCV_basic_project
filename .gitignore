@@ -13,6 +13,9 @@ output/
 *.mov
 *.mkv
 
+# 日志 (避免 auto_push.sh 把自身日志当成变更循环提交)
+*.log
+
 # Editor / OS
 .vscode/
 .idea/

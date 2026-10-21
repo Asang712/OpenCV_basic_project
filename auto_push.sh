@@ -3,7 +3,7 @@
 #
 # 用法:
 #   ./auto_push.sh                  # 前台运行, 日志打印到终端
-#   nohup ./auto_push.sh > auto_push.log 2>&1 &   # 后台运行
+#   nohup ./auto_push.sh > /tmp/auto_push.log 2>&1 &   # 后台运行 (日志放 /tmp, 避免监控到自身日志)
 #   pkill -f auto_push.sh           # 停止
 #   DRY_RUN=1 ./auto_push.sh        # 演练模式: 只检测和提示, 不真正提交/推送
 #
