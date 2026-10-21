@@ -1,1 +1,14 @@
 [2026-10-21 09:28:56] 开始监控: /home/asang/OpenCV_project/OpenCV_ws (分支 main, 远端 origin, dry-run=0)
+[2026-10-21 09:29:01] 已提交: auto: sync .gitignore auto_push.log auto_push.sh 2026-10-21 09:29:01
+[2026-10-21 09:29:05] 已推送到 origin/main
+[2026-10-21 09:29:05] 模式: 轮询 (每 10s, 安装 inotify-tools 可改为实时监听)
+[111030:111030:20261021,092915.876430:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111031:111031:20261021,092915.880411:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111245:111245:20261021,092920.882781:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111246:111246:20261021,092920.886117:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111247:111247:20261021,092920.887163:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111248:111248:20261021,092920.887334:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111249:111249:20261021,092920.887565:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111250:111250:20261021,092920.887729:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111251:111251:20261021,092920.891028:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
+[111252:111252:20261021,092920.893666:WARNING crashpad_client_linux.cc:432] prctl: 无效的参数 (22)
