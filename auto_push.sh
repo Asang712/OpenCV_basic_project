@@ -28,8 +28,36 @@ cd "$REPO_DIR" || exit 1
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
+do_push() {
+    if git push "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+        log "已推送到 $REMOTE/$BRANCH"
+        return 0
+    fi
+    log "推送失败, 尝试 pull --rebase 后重试..."
+    git pull --rebase --autostash "$REMOTE" "$BRANCH" >/dev/null 2>&1
+    if git push "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+        log "已推送到 $REMOTE/$BRANCH"
+    else
+        log "[警告] 推送仍失败, 请检查网络或远端状态; 下次变更时会重试"
+    fi
+}
+
+has_unpushed() {
+    [ -n "$(git log "$REMOTE/$BRANCH..HEAD" --oneline 2>/dev/null)" ]
+}
+
 sync_changes() {
-    [ -z "$(git status --porcelain)" ] && return 0
+    # 工作区干净但有未推送提交: 直接推送
+    if [ -z "$(git status --porcelain)" ]; then
+        if has_unpushed; then
+            if [ "$DRY_RUN" = "1" ]; then
+                log "[dry-run] 存在未推送提交, 将执行 push"
+            else
+                do_push
+            fi
+        fi
+        return 0
+    fi
 
     sleep "$DEBOUNCE"   # 等待连续修改落盘
     [ -z "$(git status --porcelain)" ] && return 0
@@ -45,18 +73,7 @@ sync_changes() {
     git add -A
     git -c user.name="$GIT_NAME" -c user.email="$GIT_EMAIL" commit -m "$msg" >/dev/null || return 0
     log "已提交: $msg"
-
-    if git push "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
-        log "已推送到 $REMOTE/$BRANCH"
-    else
-        log "推送失败, 尝试 pull --rebase 后重试..."
-        git pull --rebase --autostash "$REMOTE" "$BRANCH" >/dev/null 2>&1
-        if git push "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
-            log "已推送到 $REMOTE/$BRANCH"
-        else
-            log "[警告] 推送仍失败, 请检查网络或远端状态; 下次变更时会重试"
-        fi
-    fi
+    do_push
 }
 
 log "开始监控: $REPO_DIR (分支 $BRANCH, 远端 $REMOTE, dry-run=$DRY_RUN)"
