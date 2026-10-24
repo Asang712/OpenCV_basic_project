@@ -1,3 +1,4 @@
-opencv-python>=4.5
-numpy>=1.20
-Pillow>=9.0
+opencv-python>=4.8,<5.0
+numpy>=1.23,<2.0
+# Pillow 为可选依赖, 仅用于画面中文显示; 不安装时自动退回英文标签
+Pillow>=9.0,<11.0

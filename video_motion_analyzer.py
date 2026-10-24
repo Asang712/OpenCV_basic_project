@@ -62,6 +62,18 @@ LK_PARAMS = dict(winSize=(21, 21), maxLevel=3,
 
 MIN_TRACK_POINTS = 10  # 有效跟踪点低于该数量时重新检测特征点
 
+# 离群点剔除: 位移超过「中值 × OUTLIER_MEDIAN_SCALE」或低于 OUTLIER_MIN_MAG 的处理
+OUTLIER_MEDIAN_SCALE = 3.0
+OUTLIER_MIN_MAG = 2.0
+
+# 防抖指数平滑系数 (0~1): 越大越跟随原始偏移, 越小越平滑
+STAB_SMOOTH_ALPHA = 0.08
+
+# 可视化常量
+ARROW_SCALE = 8       # 平均运动箭头放大倍数
+PANEL_W, PANEL_H = 340, 140   # HUD 半透明面板尺寸
+REF_RES = 720.0       # 阈值参考分辨率 (长边像素), 用于跨分辨率归一化
+
 MAIN_WINDOW = "Motion Analyzer"
 STAB_WINDOW = "Stabilized Preview"
 
@@ -157,7 +169,7 @@ class MotionAnalyzer:
                 vectors = new_pts - old_pts
                 # 简单离群剔除: 幅度远大于中值的跟踪视为误匹配
                 mags = np.linalg.norm(vectors, axis=1)
-                keep = mags <= max(3.0 * float(np.median(mags)), 2.0)
+                keep = mags <= max(OUTLIER_MEDIAN_SCALE * float(np.median(mags)), OUTLIER_MIN_MAG)
                 if keep.any():
                     vectors = vectors[keep]
                     new_pts, old_pts = new_pts[keep], old_pts[keep]
@@ -176,6 +188,8 @@ class MotionAnalyzer:
             self.last_tracks = (None, None)
 
         self.prev_gray = gray
+        # 阈值按分辨率归一化: 以长边 720px 为参考, 同一段运动在更高分辨率下像素位移更大
+        self._scale = max(gray.shape) / REF_RES
         self.window.append(vector)
         arr = np.asarray(self.window)
         smooth = arr.mean(axis=0)
@@ -185,19 +199,20 @@ class MotionAnalyzer:
         return state, smooth, magnitude, jitter
 
     def _classify(self, smooth, magnitude, jitter):
-        if jitter >= self.shake_thresh:
+        s = self._scale
+        if jitter >= self.shake_thresh * s:
             return STATE_SHAKE
-        if magnitude < self.static_thresh:
+        if magnitude < self.static_thresh * s:
             return STATE_STATIC
         return STATE_H_MOVE if abs(smooth[0]) >= abs(smooth[1]) else STATE_V_MOVE
 
     def is_severe(self, jitter):
-        return jitter >= self.severe_thresh
+        return jitter >= self.severe_thresh * self._scale
 
     def stabilized_view(self, frame, smooth):
         """简易防抖预览: 反向补偿(指数平滑后的)累计画面偏移。"""
         self.cum_offset += smooth
-        self.stab_offset = 0.92 * self.stab_offset + 0.08 * self.cum_offset
+        self.stab_offset = (1 - STAB_SMOOTH_ALPHA) * self.stab_offset + STAB_SMOOTH_ALPHA * self.cum_offset
         h, w = frame.shape[:2]
         m = np.float32([[1, 0, -self.stab_offset[0]],
                         [0, 1, -self.stab_offset[1]]])
@@ -265,14 +280,15 @@ def parse_args():
 
 
 def open_source(source):
-    if source.isdigit():
+    # 优先按文件路径解析, 避免把 "123.mp4" 这类文件名误判为摄像头索引
+    if os.path.isfile(source):
+        cap = cv2.VideoCapture(source)
+        name = source
+    elif source.isdigit():
         cap = cv2.VideoCapture(int(source))
         name = f"摄像头 {source}"
     else:
-        if not os.path.isfile(source):
-            sys.exit(f"[错误] 找不到视频文件: {source}")
-        cap = cv2.VideoCapture(source)
-        name = source
+        sys.exit(f"[错误] 视频源不存在: {source}")
     if not cap.isOpened():
         sys.exit(f"[错误] 无法打开视频源: {name}")
     return cap
@@ -293,15 +309,14 @@ def draw_overlay(frame, analyzer, state, smooth, magnitude, jitter,
             cv2.line(frame, o, n, (0, 255, 0), 1, cv2.LINE_AA)
             cv2.circle(frame, n, 3, (0, 255, 0), -1)
 
-    # 2. 画面中心的平均运动箭头 (放大 8 倍便于观察)
+    # 2. 画面中心的平均运动箭头
     center = (w // 2, h // 2)
-    tip = (int(center[0] + smooth[0] * 8), int(center[1] + smooth[1] * 8))
+    tip = (int(center[0] + smooth[0] * ARROW_SCALE), int(center[1] + smooth[1] * ARROW_SCALE))
     cv2.arrowedLine(frame, center, tip, (0, 0, 255), 3, cv2.LINE_AA, tipLength=0.15)
 
     # 3. 半透明信息面板
-    panel_w, panel_h = 340, 140
-    sub = frame[0:panel_h, 0:panel_w]
-    frame[0:panel_h, 0:panel_w] = cv2.addWeighted(sub, 0.35,
+    sub = frame[0:PANEL_H, 0:PANEL_W]
+    frame[0:PANEL_H, 0:PANEL_W] = cv2.addWeighted(sub, 0.35,
                                                   np.zeros_like(sub), 0.65, 0)
 
     # 4. 状态文本 (支持中文则中文, 否则英文)
@@ -353,7 +368,7 @@ def main():
 
     while True:
         ok, frame = cap.read()
-        if not ok:
+        if not ok or frame is None:
             break
         if args.width and frame.shape[1] != args.width:
             scale = args.width / frame.shape[1]
@@ -371,6 +386,9 @@ def main():
         writer.writerow([f"{time_s:.3f}", frame_id, state,
                          f"{smooth[0]:.3f}", f"{smooth[1]:.3f}",
                          f"{magnitude:.3f}", f"{jitter:.3f}"])
+        # 定期刷新, 防止进程崩溃时丢失最近一批日志
+        if frame_id % 30 == 0:
+            csv_file.flush()
 
         # 状态变化时在控制台打印一行
         if state != last_state:
