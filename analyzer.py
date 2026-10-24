@@ -1,0 +1,210 @@
+"""运动分析核心: 状态常量、MotionAnalyzer、ShakeSegmentRecorder。
+
+MotionAnalyzer 基于 Shi-Tomasi 角点 + Lucas-Kanade 稀疏光流, 用仿射模型 + RANSAC
+估计镜头整体运动 (自动分离背景运动与前景运动物体), 并按「位移 / 波动」分类状态。
+"""
+
+import csv
+from collections import deque
+
+import cv2
+import numpy as np
+
+# ---------------- 运动状态定义 ----------------
+STATE_STATIC = "静止"
+STATE_H_MOVE = "横向移动"
+STATE_V_MOVE = "纵向移动"
+STATE_SHAKE = "抖动"
+
+STATE_EN = {
+    STATE_STATIC: "STATIC",
+    STATE_H_MOVE: "HORIZONTAL",
+    STATE_V_MOVE: "VERTICAL",
+    STATE_SHAKE: "SHAKE",
+}
+
+# BGR 颜色: 静止-绿 / 横向-橙 / 纵向-蓝 / 抖动-红
+STATE_COLORS = {
+    STATE_STATIC: (80, 220, 80),
+    STATE_H_MOVE: (40, 160, 255),
+    STATE_V_MOVE: (255, 170, 40),
+    STATE_SHAKE: (60, 60, 235),
+}
+
+# Shi-Tomasi 角点检测参数 (cv2.goodFeaturesToTrack)
+FEATURE_PARAMS = dict(maxCorners=200, qualityLevel=0.01, minDistance=10, blockSize=7)
+# Lucas-Kanade 稀疏光流参数 (cv2.calcOpticalFlowPyrLK)
+LK_PARAMS = dict(winSize=(21, 21), maxLevel=3,
+                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+
+MIN_TRACK_POINTS = 10  # 有效跟踪点低于该数量时重新检测特征点
+
+# 离群点剔除 (RANSAC 失败时的回退策略): 位移超过「中值 × OUTLIER_MEDIAN_SCALE」丢弃
+OUTLIER_MEDIAN_SCALE = 3.0
+OUTLIER_MIN_MAG = 2.0
+
+# 防抖指数平滑系数 (0~1): 越大越跟随原始偏移, 越小越平滑
+STAB_SMOOTH_ALPHA = 0.08
+
+# 可视化常量
+ARROW_SCALE = 8       # 平均运动箭头放大倍数
+PANEL_W, PANEL_H = 340, 140   # HUD 半透明面板尺寸
+REF_RES = 720.0       # 阈值参考分辨率 (长边像素), 用于跨分辨率归一化
+
+
+class MotionAnalyzer:
+    """基于 LK 稀疏光流 + 仿射 RANSAC 的镜头运动分析器。
+
+    Args:
+        track_width: 跟踪用灰度图宽度, >0 时将原图等比缩放到该宽度再做特征检测
+            与光流跟踪 (显著提速), 0 表示不缩放。
+    """
+
+    def __init__(self, window=5, static_thresh=0.5, shake_thresh=2.5,
+                 severe_thresh=8.0, track_width=640):
+        self.static_thresh = static_thresh   # 平均位移低于该值视为静止 (px/帧 @720p)
+        self.shake_thresh = shake_thresh     # 波动高于该值判定为抖动 (px/帧 @720p)
+        self.severe_thresh = severe_thresh   # 波动高于该值标记为剧烈抖动 (@720p)
+        self.track_width = track_width
+
+        self.window = deque(maxlen=window)   # 最近 N 帧运动向量, 用于平滑
+        self.prev_gray = None
+        self.points = None                   # 当前跟踪的特征点 (跟踪坐标系)
+        self.last_tracks = (None, None)      # (旧点, 新点), 原始坐标系, 用于绘制
+
+        self.cum_offset = np.zeros(2)        # 累计画面偏移 (防抖用)
+        self.stab_offset = np.zeros(2)       # 平滑后的补偿偏移 (防抖用)
+        self._scale = 1.0                    # 阈值归一化系数
+        self._draw_scale = 1.0               # 跟踪坐标 -> 原始坐标
+
+    def process(self, gray):
+        """处理一帧灰度图。
+
+        返回: (状态, 平滑运动向量, 平均位移大小, 运动波动)
+        """
+        # ---- 1. 跟踪降分辨率: 同物理运动在更低分辨率下像素位移更小, 计算更快 ----
+        orig_h, orig_w = gray.shape[:2]
+        if self.track_width and orig_w != self.track_width:
+            scale = self.track_width / orig_w
+            track_gray = cv2.resize(gray, (self.track_width, int(orig_h * scale)))
+            self._draw_scale = 1.0 / scale
+        else:
+            track_gray = gray
+            self._draw_scale = 1.0
+
+        vector = np.zeros(2)
+        if self.prev_gray is not None and self.points is not None \
+                and len(self.points) >= MIN_TRACK_POINTS:
+            p1, st, _ = cv2.calcOpticalFlowPyrLK(
+                self.prev_gray, track_gray, self.points, None, **LK_PARAMS)
+            new_pts = p1[st == 1]
+            old_pts = self.points[st == 1]
+            if len(new_pts) >= MIN_TRACK_POINTS:
+                vector, old_in, new_in = self._estimate_motion(old_pts, new_pts)
+                if old_in is not None:
+                    self.last_tracks = (old_in * self._draw_scale,
+                                        new_in * self._draw_scale)
+                    self.points = new_in.reshape(-1, 1, 2)
+                else:
+                    self.points = None  # 跟踪丢失, 下一帧重新检测
+            else:
+                self.points = None
+        else:
+            self.points = None
+
+        if self.points is None:
+            pts = cv2.goodFeaturesToTrack(track_gray, mask=None, **FEATURE_PARAMS)
+            if pts is not None:
+                self.points = pts
+            self.last_tracks = (None, None)
+
+        self.prev_gray = track_gray
+        # 阈值按跟踪分辨率归一化, 保证跨分辨率分类一致
+        self._scale = max(track_gray.shape) / REF_RES
+        self.window.append(vector)
+        arr = np.asarray(self.window)
+        smooth = arr.mean(axis=0)
+        magnitude = float(np.linalg.norm(smooth))
+        jitter = float(np.linalg.norm(arr - smooth, axis=1).mean())
+        state = self._classify(smooth, magnitude, jitter)
+        return state, smooth, magnitude, jitter
+
+    def _estimate_motion(self, old_pts, new_pts):
+        """用仿射模型 + RANSAC 估计整体运动。
+
+        Returns: (vector, old_inliers, new_inliers)
+            vector: 仿射平移量 (跟踪坐标系); 若 RANSAC 失败则返回均值向量。
+            inliers 为 None 表示估计失败。
+        """
+        M, inliers = cv2.estimateAffinePartial2D(
+            old_pts, new_pts, method=cv2.RANSAC,
+            ransacReprojThreshold=3.0, maxIters=2000, confidence=0.99)
+        if M is not None and inliers is not None:
+            mask = inliers.ravel().astype(bool)
+            if mask.sum() >= MIN_TRACK_POINTS:
+                vector = np.array([M[0, 2], M[1, 2]], dtype=float)
+                return vector, old_pts[mask], new_pts[mask]
+
+        # 回退: 中值离群剔除 + 均值向量
+        vectors = new_pts - old_pts
+        mags = np.linalg.norm(vectors, axis=1)
+        keep = mags <= max(OUTLIER_MEDIAN_SCALE * float(np.median(mags)), OUTLIER_MIN_MAG)
+        if keep.any():
+            vectors = vectors[keep]
+            new_pts, old_pts = new_pts[keep], old_pts[keep]
+        return vectors.mean(axis=0), old_pts, new_pts
+
+    def _classify(self, smooth, magnitude, jitter):
+        s = self._scale
+        # 先看波动 (方向来回变 -> 抖动), 再看位移 (整体快慢 -> 静止/移动)
+        if jitter >= self.shake_thresh * s:
+            return STATE_SHAKE
+        if magnitude < self.static_thresh * s:
+            return STATE_STATIC
+        return STATE_H_MOVE if abs(smooth[0]) >= abs(smooth[1]) else STATE_V_MOVE
+
+    def is_severe(self, jitter):
+        return jitter >= self.severe_thresh * self._scale
+
+    def stabilized_view(self, frame, smooth):
+        """简易防抖预览: 反向补偿(指数平滑后的)累计画面偏移。"""
+        self.cum_offset += smooth
+        self.stab_offset = (1 - STAB_SMOOTH_ALPHA) * self.stab_offset + STAB_SMOOTH_ALPHA * self.cum_offset
+        h, w = frame.shape[:2]
+        m = np.float32([[1, 0, -self.stab_offset[0]],
+                        [0, 1, -self.stab_offset[1]]])
+        return cv2.warpAffine(frame, m, (w, h))
+
+
+class ShakeSegmentRecorder:
+    """自动记录剧烈抖动片段 (开始/结束时间与帧号)。"""
+
+    def __init__(self, severe_thresh):
+        self.severe_thresh = severe_thresh
+        self.segments = []   # (起始帧, 起始时间, 结束帧, 结束时间, 峰值波动)
+        self.current = None
+
+    def update(self, frame_id, time_s, state, jitter):
+        if state == STATE_SHAKE and self.is_severe_state(jitter):
+            if self.current is None:
+                self.current = [frame_id, time_s, jitter]
+            else:
+                self.current[2] = max(self.current[2], jitter)
+        elif self.current is not None:
+            self.segments.append((*self.current[:2], frame_id - 1, time_s, self.current[2]))
+            self.current = None
+
+    def is_severe_state(self, jitter):
+        return jitter >= self.severe_thresh
+
+    def close(self, frame_id, time_s):
+        if self.current is not None:
+            self.segments.append((*self.current[:2], frame_id, time_s, self.current[2]))
+            self.current = None
+
+    def save(self, path):
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["开始时间(s)", "结束时间(s)", "起始帧", "结束帧", "峰值波动(px/帧)"])
+            for s in self.segments:
+                writer.writerow([f"{s[1]:.3f}", f"{s[3]:.3f}", s[0], s[2], f"{s[4]:.3f}"])
