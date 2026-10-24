@@ -8,12 +8,12 @@ import sys
 
 import numpy as np
 import pytest
-import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyzer import (MotionAnalyzer, ShakeSegmentRecorder, STATE_H_MOVE,
                       STATE_SHAKE, STATE_STATIC, STATE_V_MOVE)
+from tests.helpers import make_texture as _make_texture, shift as _shift_right
 
 
 # ---------------- MotionAnalyzer._classify ----------------
@@ -100,29 +100,10 @@ def test_recorder_ignores_non_severe_shake():
 
 # ---------------- MotionAnalyzer.process 端到端烟测 ----------------
 
-def _make_texture(w=300, h=150, seed=0):
-    """生成含大块亮斑的纹理图, 比纯随机噪声更易于光流跟踪。"""
-    rng = np.random.RandomState(seed)
-    img = np.full((h, w), 30, dtype=np.uint8)
-    for _ in range(40):
-        cx, cy, r = rng.randint(0, w), rng.randint(0, h), rng.randint(8, 25)
-        cv2.circle(img, (cx, cy), r, int(rng.randint(120, 255)), -1)
-    return cv2.GaussianBlur(img, (5, 5), 0)
-
-
-def _shift_right(img, px):
-    """将图像内容整体右移 px 像素 (左侧填黑)。"""
-    out = np.zeros_like(img)
-    if px > 0:
-        out[:, px:] = img[:, :-px]
-    else:
-        out[:] = img
-    return out
-
 
 def test_process_detects_horizontal_motion():
-    """逐帧向右递增平移, 窗口填满后应稳定判为横向移动。"""
-    a = MotionAnalyzer(window=5, track_width=0)
+    """逐帧向右递增平移, 卡尔曼收敛后应稳定判为横向移动。"""
+    a = MotionAnalyzer(track_width=0)
     base = _make_texture(w=300, h=150)
     a.process(base)
     last_state = None
@@ -134,8 +115,8 @@ def test_process_detects_horizontal_motion():
 
 
 def test_process_static_frames():
-    """完全相同的帧应被判为静止 (窗口填满后)。"""
-    a = MotionAnalyzer(window=5, track_width=0)
+    """完全相同的帧, 卡尔曼收敛后应判为静止。"""
+    a = MotionAnalyzer(track_width=0)
     base = _make_texture()
     a.process(base)
     last_state = None
@@ -147,11 +128,11 @@ def test_process_static_frames():
 
 def test_process_track_width_downscale():
     """开启 track_width 时跟踪分辨率降低, 仍能稳定检测横向运动。"""
-    a = MotionAnalyzer(window=5, track_width=100)
+    a = MotionAnalyzer(track_width=200)
     base = _make_texture(w=400, h=240)
     a.process(base)
     last_state = None
-    for k in range(1, 10):
-        frame = _shift_right(base, 6 * k)   # 每帧右移 6px (缩放到 100 宽约 1.5px)
+    for k in range(1, 15):
+        frame = _shift_right(base, 5 * k)   # 每帧右移 5px (缩放到 200 宽约 2.5px)
         last_state, smooth, mag, jit = a.process(frame)
     assert last_state == STATE_H_MOVE

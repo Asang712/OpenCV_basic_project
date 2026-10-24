@@ -27,26 +27,31 @@ import cv2
 
 from analyzer import (MotionAnalyzer, ShakeSegmentRecorder, STATE_H_MOVE,
                       STATE_SHAKE, STATE_STATIC, STATE_V_MOVE)
+from io_utils import VideoStream, open_source
 from viz import MAIN_WINDOW, STAB_WINDOW, TextRenderer, draw_overlay
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="视频镜头运动分析器 (Shi-Tomasi 角点 + LK 稀疏光流 + 仿射 RANSAC)")
+        description="视频镜头运动分析器 (Shi-Tomasi 角点 + LK 稀疏光流 + 仿射 RANSAC + 卡尔曼平滑)")
     parser.add_argument("--source", required=True,
                         help="视频文件路径或摄像头索引 (如 0)")
     parser.add_argument("--csv", default="output/motion_log.csv",
                         help="运动日志 CSV 输出路径 (默认 output/motion_log.csv)")
-    parser.add_argument("--window", type=int, default=5,
-                        help="运动平滑窗口帧数 (默认 5)")
     parser.add_argument("--static-thresh", type=float, default=0.5,
                         help="静止判断阈值, 平均位移 px/帧 @720p (默认 0.5)")
     parser.add_argument("--shake-thresh", type=float, default=2.5,
-                        help="抖动判断阈值, 窗口内波动 px/帧 @720p (默认 2.5)")
+                        help="抖动判断阈值, 卡尔曼残差 px/帧 @720p (默认 2.5)")
     parser.add_argument("--severe-thresh", type=float, default=8.0,
-                        help="剧烈抖动标记阈值, 运动波动 px/帧 @720p (默认 8.0)")
+                        help="剧烈抖动标记阈值, 残差 px/帧 @720p (默认 8.0)")
     parser.add_argument("--track-width", type=int, default=640,
                         help="跟踪用灰度图宽度 (默认 640, 0=不缩放)")
+    parser.add_argument("--no-clahe", action="store_true",
+                        help="关闭 CLAHE 光照归一化 (默认开启)")
+    parser.add_argument("--kalman-q", type=float, default=1e-3,
+                        help="卡尔曼过程噪声 (默认 1e-3, 越大越跟随原始测量)")
+    parser.add_argument("--kalman-r", type=float, default=0.5,
+                        help="卡尔曼测量噪声 (默认 0.5, 越大越平滑)")
     parser.add_argument("--stabilize", action="store_true",
                         help="开启简易防抖预览窗口 (运行中按 s 可开关)")
     parser.add_argument("--no-display", action="store_true",
@@ -58,24 +63,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def open_source(source):
-    # 优先按文件路径解析, 避免把 "123.mp4" 这类文件名误判为摄像头索引
-    if os.path.isfile(source):
-        cap = cv2.VideoCapture(source)
-        name = source
-    elif source.isdigit():
-        cap = cv2.VideoCapture(int(source))
-        name = f"摄像头 {source}"
-    else:
-        sys.exit(f"[错误] 视频源不存在: {source}")
-    if not cap.isOpened():
-        sys.exit(f"[错误] 无法打开视频源: {name}")
-    return cap
-
-
 def main():
     args = parse_args()
     cap = open_source(args.source)
+    stream = VideoStream(cap)   # 后台线程读帧, 主循环不再阻塞
     fps_in = cap.get(cv2.CAP_PROP_FPS)
     if not fps_in or fps_in <= 0:
         fps_in = 30.0
@@ -89,9 +80,9 @@ def main():
     writer.writerow(["时间戳(s)", "帧号", "运动类型",
                      "平均位移dx(px)", "平均位移dy(px)", "平均位移大小(px)", "运动波动(px)"])
 
-    analyzer = MotionAnalyzer(args.window, args.static_thresh,
-                              args.shake_thresh, args.severe_thresh,
-                              track_width=args.track_width)
+    analyzer = MotionAnalyzer(args.static_thresh, args.shake_thresh, args.severe_thresh,
+                              track_width=args.track_width, use_clahe=not args.no_clahe,
+                              kalman_proc_noise=args.kalman_q, kalman_meas_noise=args.kalman_r)
     recorder = ShakeSegmentRecorder(args.severe_thresh)
     renderer = TextRenderer()
 
@@ -102,12 +93,12 @@ def main():
     show_stab = args.stabilize
 
     print(f"视频源: {args.source} | 分辨率: {int(cap.get(3))}x{int(cap.get(4))} "
-          f"| 跟踪宽度: {args.track_width} | FPS: {fps_in:.1f} | "
-          f"中文显示: {'是' if renderer.supports_cn() else '否(缺字体)'}")
+          f"| 跟踪宽度: {args.track_width} | CLAHE: {'开' if not args.no_clahe else '关'} "
+          f"| FPS: {fps_in:.1f} | 中文显示: {'是' if renderer.supports_cn() else '否(缺字体)'}")
     print("按 q / ESC 退出, 按 s 开关防抖预览\n")
 
     while True:
-        ok, frame = cap.read()
+        ok, frame = stream.read()
         if not ok or frame is None:
             break
         if args.width and frame.shape[1] != args.width:
@@ -166,7 +157,7 @@ def main():
     recorder.close(frame_id, frame_id / fps_in)
     recorder.save(shake_path)
     csv_file.close()
-    cap.release()
+    stream.release()
     if not args.no_display:
         cv2.destroyAllWindows()
 

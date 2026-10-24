@@ -11,8 +11,11 @@
 | 多输入源       | 本地视频文件 / USB 摄像头实时流                                                                  |
 | 稀疏光流跟踪     | Shi-Tomasi 角点检测（`cv2.goodFeaturesToTrack`）+ LK 光流（`cv2.calcOpticalFlowPyrLK`） |
 | 仿射运动估计     | `cv2.estimateAffinePartial2D` + RANSAC 估计镜头整体运动，自动分离前景运动物体与背景 |
-| 运动状态分类     | 静止 / 横向移动 / 纵向移动 / 抖动（基于平滑平均向量 + 窗口内波动阈值判断）                                          |
+| 光照归一化       | CLAHE（`cv2.createCLAHE`）均衡对比度，减弱曝光/光照突变对光流的干扰（`--no-clahe` 可关） |
+| 卡尔曼平滑       | 用常加速度卡尔曼滤波平滑运动向量，**波动定义为测量残差**，相比滑动窗口响应更快、更能处理加减速 |
+| 运动状态分类     | 静止 / 横向移动 / 纵向移动 / 抖动（基于卡尔曼平滑向量 + 残差阈值判断） |
 | 跟踪降分辨率     | 特征检测与光流在缩放到 `--track-width`（默认 640）的灰度图上运行，提速且不影响分类 |
+| 多线程读帧       | 后台线程预读帧到有界队列，主循环不再阻塞在 `cap.read()`，提升实时性 |
 | 画面可视化      | 特征点、逐点运动轨迹、中心平均运动箭头、状态/位移/波动 HUD                                                     |
 | CSV 运动日志   | 时间戳、帧号、运动类型、平均位移 dx/dy、位移大小、运动波动                                                     |
 | 防抖预览（扩展）   | 反向补偿累计画面偏移的简易稳定窗口（`--stabilize` 或按 `s` 开关）                                           |
@@ -22,17 +25,20 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `video_motion_analyzer.py` | 入口脚本：参数解析、视频源、主循环编排 |
-| `analyzer.py` | 核心算法：`MotionAnalyzer`（光流+仿射RANSAC+分类+防抖）、`ShakeSegmentRecorder` |
+| `video_motion_analyzer.py` | 入口脚本：参数解析、主循环编排 |
+| `analyzer.py` | 核心算法：`MotionKalman`、`MotionAnalyzer`（光流+仿射RANSAC+卡尔曼+分类+防抖）、`ShakeSegmentRecorder` |
+| `io_utils.py` | 视频输入：`open_source`、`VideoStream`（后台线程读帧） |
 | `viz.py` | 可视化：中文文字渲染 `TextRenderer`、`draw_overlay` HUD 叠加 |
-| `tests/test_analyzer.py` | 单元测试（`python3 -m pytest tests/ -v`） |
+| `tests/` | 单元测试 + 合成视频 ground-truth 验证（`python3 -m pytest tests/ -v`） |
 
 ## 运动判断原理
 
-1. 将灰度图缩放到 `--track-width` 宽度（默认 640）做特征检测与光流跟踪，降低计算量。
-2. 对相邻两帧的特征点做 LK 跟踪，用**仿射模型 + RANSAC**（`cv2.estimateAffinePartial2D`）拟合整体运动，取内点（背景）的平移量作为帧级运动向量 `(dx, dy)`——运动物体等外点被自动剔除。
-3. 用最近 `--window`（默认 5）帧的向量求平均，得到平滑运动向量；同时计算窗口内各帧向量相对均值的平均偏差，作为**运动波动**（抖动强度）。
-4. 阈值分类（以长边 720px 为参考分辨率，实际阈值会按跟踪分辨率自动缩放，单位 px/帧，可用命令行参数调节）：
+1. **多线程读帧**：`VideoStream` 在后台线程持续解码，主线程从有界队列取帧，避免 I/O 阻塞。
+2. **跟踪降分辨率**：将灰度图缩放到 `--track-width`（默认 640）做特征检测与光流跟踪，降低计算量。
+3. **光照归一化**：对跟踪灰度图做 CLAHE，减弱曝光突变对光流匹配的干扰。
+4. **仿射 RANSAC**：对相邻两帧的特征点做 LK 跟踪，用 `cv2.estimateAffinePartial2D(..., method=RANSAC)` 拟合整体运动，取内点（背景）的平移量作为帧级运动向量 `(dx, dy)`——运动物体等外点被自动剔除。
+5. **卡尔曼平滑**：用常加速度模型卡尔曼滤波平滑运动向量；**运动波动 = 测量残差（innovation）的模**，真实反映"当前运动偏离平滑预期的程度"。
+6. 阈值分类（以长边 720px 为参考分辨率，实际阈值按跟踪分辨率自动缩放，单位 px/帧，可用命令行参数调节）：
    - 波动 `>= shake-thresh(2.5)` → **抖动**（方向来回变化，均值被抵消也能检出）
    - 平均位移 `< static-thresh(0.5)` → **静止**
    - `|dx| >= |dy|` → **横向移动**，否则 → **纵向移动**
@@ -71,11 +77,13 @@ python3 video_motion_analyzer.py --source test.mp4 --static-thresh 0.8 --shake-t
 | ----------------- | ----------------------- | ------------------- |
 | `--source`        | 必填                      | 视频文件路径或摄像头索引（如 `0`） |
 | `--csv`           | `output/motion_log.csv` | 运动日志输出路径            |
-| `--window`        | 5                       | 运动平滑窗口帧数            |
 | `--static-thresh` | 0.5                     | 静止判断阈值（px/帧 @720p） |
-| `--shake-thresh`  | 2.5                     | 抖动判断阈值（窗口内波动 px/帧 @720p） |
+| `--shake-thresh`  | 2.5                     | 抖动判断阈值（卡尔曼残差 px/帧 @720p） |
 | `--severe-thresh` | 8.0                     | 剧烈抖动标记阈值（px/帧 @720p） |
 | `--track-width`   | 640                     | 跟踪用灰度图宽度（0 = 不缩放） |
+| `--no-clahe`      | 关                       | 关闭 CLAHE 光照归一化（默认开启） |
+| `--kalman-q`      | 1e-3                    | 卡尔曼过程噪声（越大越跟随原始测量） |
+| `--kalman-r`      | 0.5                     | 卡尔曼测量噪声（越大越平滑） |
 | `--stabilize`     | 关                       | 开启防抖预览窗口            |
 | `--no-display`    | 关                       | 无窗口运行               |
 | `--max-frames`    | 0                       | 最多处理帧数（0 = 不限制）     |

@@ -5,7 +5,6 @@ MotionAnalyzer 基于 Shi-Tomasi 角点 + Lucas-Kanade 稀疏光流, 用仿射�
 """
 
 import csv
-from collections import deque
 
 import cv2
 import numpy as np
@@ -52,6 +51,40 @@ PANEL_W, PANEL_H = 340, 140   # HUD 半透明面板尺寸
 REF_RES = 720.0       # 阈值参考分辨率 (长边像素), 用于跨分辨率归一化
 
 
+class MotionKalman:
+    """运动向量的卡尔曼平滑器。
+
+    状态 x = [dx, dy, ddx, ddy] (运动向量 + 其变化率), 常加速度模型。
+    相比滑动窗口均值, 卡尔曼滤波在平滑的同时响应更快, 且能处理加减速。
+    输出 smooth 为滤波后的运动向量, jitter 为测量残差 (innovation)。
+    """
+
+    def __init__(self, proc_noise=1e-3, meas_noise=0.5):
+        # 状态转移: x(k+1) = F x(k); 速度项积分到位置
+        self.F = np.eye(4)
+        self.F[0, 2] = self.F[1, 3] = 1.0
+        self.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=float)  # 只观测 (dx, dy)
+        self.x = np.zeros(4)
+        self.P = np.eye(4) * 10.0
+        self.Q = np.eye(4) * proc_noise
+        self.R = np.eye(2) * meas_noise
+
+    def update(self, measurement):
+        """measurement: 本帧原始运动向量 (2,)。返回 (smooth, jitter)。"""
+        # ---------- predict ----------
+        self.x = self.F @ self.x
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        # ---------- update ----------
+        y = measurement - self.H @ self.x                 # innovation
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ y
+        self.P = (np.eye(4) - K @ self.H) @ self.P
+        smooth = self.x[:2].copy()
+        jitter = float(np.linalg.norm(y))
+        return smooth, jitter
+
+
 class MotionAnalyzer:
     """基于 LK 稀疏光流 + 仿射 RANSAC 的镜头运动分析器。
 
@@ -60,14 +93,15 @@ class MotionAnalyzer:
             与光流跟踪 (显著提速), 0 表示不缩放。
     """
 
-    def __init__(self, window=5, static_thresh=0.5, shake_thresh=2.5,
-                 severe_thresh=8.0, track_width=640):
+    def __init__(self, static_thresh=0.5, shake_thresh=2.5, severe_thresh=8.0,
+                 track_width=640, use_clahe=True,
+                 kalman_proc_noise=1e-3, kalman_meas_noise=0.5):
         self.static_thresh = static_thresh   # 平均位移低于该值视为静止 (px/帧 @720p)
         self.shake_thresh = shake_thresh     # 波动高于该值判定为抖动 (px/帧 @720p)
         self.severe_thresh = severe_thresh   # 波动高于该值标记为剧烈抖动 (@720p)
         self.track_width = track_width
+        self.use_clahe = use_clahe
 
-        self.window = deque(maxlen=window)   # 最近 N 帧运动向量, 用于平滑
         self.prev_gray = None
         self.points = None                   # 当前跟踪的特征点 (跟踪坐标系)
         self.last_tracks = (None, None)      # (旧点, 新点), 原始坐标系, 用于绘制
@@ -76,6 +110,11 @@ class MotionAnalyzer:
         self.stab_offset = np.zeros(2)       # 平滑后的补偿偏移 (防抖用)
         self._scale = 1.0                    # 阈值归一化系数
         self._draw_scale = 1.0               # 跟踪坐标 -> 原始坐标
+
+        self.kalman = MotionKalman(proc_noise=kalman_proc_noise,
+                                   meas_noise=kalman_meas_noise)
+        # CLAHE 光照归一化, 减弱曝光突变对光流的干扰
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if use_clahe else None
 
     def process(self, gray):
         """处理一帧灰度图。
@@ -91,6 +130,10 @@ class MotionAnalyzer:
         else:
             track_gray = gray
             self._draw_scale = 1.0
+
+        # ---- 2. CLAHE 光照归一化: 减弱曝光/光照突变对光流的干扰 ----
+        if self.clahe is not None:
+            track_gray = self.clahe.apply(track_gray)
 
         vector = np.zeros(2)
         if self.prev_gray is not None and self.points is not None \
@@ -121,11 +164,9 @@ class MotionAnalyzer:
         self.prev_gray = track_gray
         # 阈值按跟踪分辨率归一化, 保证跨分辨率分类一致
         self._scale = max(track_gray.shape) / REF_RES
-        self.window.append(vector)
-        arr = np.asarray(self.window)
-        smooth = arr.mean(axis=0)
+        # 卡尔曼平滑: 输出滤波后的运动向量与测量残差(抖动强度)
+        smooth, jitter = self.kalman.update(vector)
         magnitude = float(np.linalg.norm(smooth))
-        jitter = float(np.linalg.norm(arr - smooth, axis=1).mean())
         state = self._classify(smooth, magnitude, jitter)
         return state, smooth, magnitude, jitter
 
