@@ -40,7 +40,7 @@ class App:
         self.track_var = tk.IntVar(value=640)
         self.clahe_var = tk.BooleanVar(value=True)
         self.stab_var = tk.BooleanVar(value=False)
-        self.kq_var = tk.DoubleVar(value=1e-3)
+        self.kq_var = tk.DoubleVar(value=1e-2)
         self.kr_var = tk.DoubleVar(value=0.5)
 
         self.running = False
