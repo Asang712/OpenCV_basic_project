@@ -48,7 +48,7 @@ def parse_args():
                         help="跟踪用灰度图宽度 (默认 640, 0=不缩放)")
     parser.add_argument("--no-clahe", action="store_true",
                         help="关闭 CLAHE 光照归一化 (默认开启)")
-    parser.add_argument("--kalman-q", type=float, default=1e-3,
+    parser.add_argument("--kalman-q", type=float, default=1e-2,
                         help="卡尔曼过程噪声 (默认 1e-3, 越大越跟随原始测量)")
     parser.add_argument("--kalman-r", type=float, default=0.5,
                         help="卡尔曼测量噪声 (默认 0.5, 越大越平滑)")

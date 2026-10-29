@@ -154,6 +154,7 @@ class App:
                 frame_id += 1
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 state, smooth, mag, jit = analyzer.process(gray)
+                recorder.set_scale(analyzer._scale)
                 counts[state] += 1
                 severe = state == STATE_SHAKE and recorder.is_severe_state(jit)
                 recorder.update(frame_id, frame_id / fps_in, state, jit)
