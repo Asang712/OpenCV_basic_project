@@ -196,18 +196,21 @@ class MotionAnalyzer:
     def _estimate_motion(self, old_pts, new_pts):
         """用仿射模型 + RANSAC 估计整体运动。
 
-        Returns: (vector, old_inliers, new_inliers)
+        Returns: (vector, old_inliers, new_inliers) 或 None (估计不可靠)
             vector: 仿射平移量 (跟踪坐标系); 若 RANSAC 失败则返回均值向量。
-            inliers 为 None 表示估计失败。
+            当 RANSAC 内点占比过低 (前景物体主导) 时返回 None, 调用方应复用旧向量。
         """
         M, inliers = cv2.estimateAffinePartial2D(
             old_pts, new_pts, method=cv2.RANSAC,
             ransacReprojThreshold=3.0, maxIters=2000, confidence=0.99)
         if M is not None and inliers is not None:
             mask = inliers.ravel().astype(bool)
-            if mask.sum() >= MIN_TRACK_POINTS:
+            inlier_ratio = mask.sum() / max(len(old_pts), 1)
+            if mask.sum() >= MIN_TRACK_POINTS and inlier_ratio >= MIN_INLIER_RATIO:
                 vector = np.array([M[0, 2], M[1, 2]], dtype=float)
                 return vector, old_pts[mask], new_pts[mask]
+            # 内点占比过低 -> 很可能前景物体主导了"最大一致集", 估计不可靠
+            return None
 
         # 回退: 中值离群剔除 + 均值向量
         vectors = new_pts - old_pts
@@ -243,10 +246,15 @@ class MotionAnalyzer:
 class ShakeSegmentRecorder:
     """自动记录剧烈抖动片段 (开始/结束时间与帧号)。"""
 
-    def __init__(self, severe_thresh):
+    def __init__(self, severe_thresh, scale=1.0):
         self.severe_thresh = severe_thresh
+        self.scale = scale            # 阈值归一化系数 (与 analyzer._scale 保持一致)
         self.segments = []   # (起始帧, 起始时间, 结束帧, 结束时间, 峰值波动)
         self.current = None
+
+    def set_scale(self, scale):
+        """同步 analyzer 的分辨率归一化系数。"""
+        self.scale = scale
 
     def update(self, frame_id, time_s, state, jitter):
         if state == STATE_SHAKE and self.is_severe_state(jitter):
@@ -259,7 +267,7 @@ class ShakeSegmentRecorder:
             self.current = None
 
     def is_severe_state(self, jitter):
-        return jitter >= self.severe_thresh
+        return jitter >= self.severe_thresh * self.scale
 
     def close(self, frame_id, time_s):
         if self.current is not None:
