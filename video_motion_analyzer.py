@@ -110,6 +110,7 @@ def main():
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         state, smooth, magnitude, jitter = analyzer.process(gray)
+        recorder.set_scale(analyzer._scale)
         state_counts[state] += 1
         severe = state == STATE_SHAKE and recorder.is_severe_state(jitter)
         recorder.update(frame_id, time_s, state, jitter)
