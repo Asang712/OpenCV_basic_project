@@ -16,6 +16,11 @@ output/
 # 日志 (避免 auto_push.sh 把自身日志当成变更循环提交)
 *.log
 
+# 打包产物 (PyInstaller)
+build/
+dist/
+*.spec
+
 # Editor / OS
 .vscode/
 .idea/

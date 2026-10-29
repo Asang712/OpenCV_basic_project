@@ -25,10 +25,12 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `video_motion_analyzer.py` | 入口脚本：参数解析、主循环编排 |
+| `video_motion_analyzer.py` | 命令行入口：参数解析、主循环编排 |
+| `gui.py` | **桌面图形界面**：参数面板 + 实时视频预览 + 结果输出（Tkinter） |
 | `analyzer.py` | 核心算法：`MotionKalman`、`MotionAnalyzer`（光流+仿射RANSAC+卡尔曼+分类+防抖）、`ShakeSegmentRecorder` |
 | `io_utils.py` | 视频输入：`open_source`、`VideoStream`（后台线程读帧） |
 | `viz.py` | 可视化：中文文字渲染 `TextRenderer`、`draw_overlay` HUD 叠加 |
+| `build.sh` | 打包脚本：用 PyInstaller 生成单文件可执行程序 |
 | `tests/` | 单元测试 + 合成视频 ground-truth 验证（`python3 -m pytest tests/ -v`） |
 
 ## 运动判断原理
@@ -94,6 +96,37 @@ python3 video_motion_analyzer.py --source test.mp4 --static-thresh 0.8 --shake-t
 - `q` / `ESC`：退出
 - `s`：开关防抖预览窗口
 
+## 桌面 GUI
+
+无需记忆命令行参数，图形界面直接操作：
+
+```bash
+python3 gui.py
+```
+
+界面布局：
+- **左侧面板**：选择视频源（文件或摄像头索引）、调节全部阈值与卡尔曼参数、CLAHE/防抖开关、开始/停止按钮
+- **右侧区域**：实时视频预览（含特征点、运动箭头、HUD 叠加）
+- **左下结果区**：实时显示各运动状态帧数占比与剧烈抖动片段清单
+
+> GUI 与命令行共用同一套 `MotionAnalyzer` 算法，结果完全一致。
+
+## 打包为可执行文件
+
+将项目打包成**单文件可执行程序**，接收方无需安装 Python 即可运行：
+
+```bash
+./build.sh
+```
+
+产物位于 `dist/MotionAnalyzer`（Windows 上为 `dist/MotionAnalyzer.exe`），双击即可启动桌面 GUI。
+
+**分发说明**：
+- 可执行文件已内嵌 Python 解释器、OpenCV、NumPy、Pillow，体积约 80~150 MB
+- **无法交叉编译**：必须在目标操作系统上运行 `build.sh`（Windows 产物需在 Windows 构建，macOS/Linux 同理）
+- 打包产物 `dist/`、`build/`、`*.spec` 已在 `.gitignore` 中，不会污染仓库
+- 可将 `dist/` 下的可执行文件上传到 GitHub Release 供他人下载
+
 ## 输出文件
 
 - **motion\_log.csv**：逐帧运动日志，列为 `时间戳(s), 帧号, 运动类型, 平均位移dx(px), 平均位移dy(px), 平均位移大小(px), 运动波动(px)`（UTF-8 BOM，Excel 可直接打开）。
@@ -104,9 +137,15 @@ python3 video_motion_analyzer.py --source test.mp4 --static-thresh 0.8 --shake-t
 
 ```
 .
-├── video_motion_analyzer.py   # 主程序（单文件实现全部功能）
+├── video_motion_analyzer.py   # 命令行入口
+├── gui.py                     # 桌面 GUI 入口
+├── analyzer.py                # 核心算法
+├── io_utils.py                # 视频输入
+├── viz.py                     # 可视化
+├── build.sh                   # 打包脚本
 ├── requirements.txt
 ├── README.md
+├── tests/                     # 单元测试
 └── output/                    # 运行时生成的日志目录（已 gitignore）
 ```
 
