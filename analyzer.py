@@ -99,12 +99,14 @@ class MotionAnalyzer:
 
     def __init__(self, static_thresh=0.5, shake_thresh=2.5, severe_thresh=8.0,
                  track_width=640, use_clahe=True,
-                 kalman_proc_noise=1e-3, kalman_meas_noise=0.5):
+                 kalman_proc_noise=1e-2, kalman_meas_noise=0.5,
+                 border_ratio=BORDER_RATIO):
         self.static_thresh = static_thresh   # 平均位移低于该值视为静止 (px/帧 @720p)
         self.shake_thresh = shake_thresh     # 波动高于该值判定为抖动 (px/帧 @720p)
         self.severe_thresh = severe_thresh   # 波动高于该值标记为剧烈抖动 (@720p)
         self.track_width = track_width
         self.use_clahe = use_clahe
+        self.border_ratio = border_ratio     # 仅边缘区域的点参与镜头运动估计
 
         self.prev_gray = None
         self.points = None                   # 当前跟踪的特征点 (跟踪坐标系)
@@ -114,6 +116,7 @@ class MotionAnalyzer:
         self.stab_offset = np.zeros(2)       # 平滑后的补偿偏移 (防抖用)
         self._scale = 1.0                    # 阈值归一化系数
         self._draw_scale = 1.0               # 跟踪坐标 -> 原始坐标
+        self._prev_vector = np.zeros(2)      # 上一帧运动向量 (估计不可靠时复用)
 
         self.kalman = MotionKalman(proc_noise=kalman_proc_noise,
                                    meas_noise=kalman_meas_noise)
