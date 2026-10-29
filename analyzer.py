@@ -150,13 +150,29 @@ class MotionAnalyzer:
             new_pts = p1[st == 1]
             old_pts = self.points[st == 1]
             if len(new_pts) >= MIN_TRACK_POINTS:
-                vector, old_in, new_in = self._estimate_motion(old_pts, new_pts)
-                if old_in is not None:
+                # 仅取画面边缘区域的点估计镜头运动 (中心易被前景物体占据造成误判)
+                h, w = track_gray.shape[:2]
+                b = int(min(h, w) * self.border_ratio)
+                border_mask = (
+                    (old_pts[:, 0] < b) | (old_pts[:, 0] >= w - b) |
+                    (old_pts[:, 1] < b) | (old_pts[:, 1] >= h - b))
+                est_old = old_pts[border_mask]
+                est_new = new_pts[border_mask]
+                # 边缘点不足时回退到全部点
+                if len(est_old) < MIN_TRACK_POINTS:
+                    est_old, est_new = old_pts, new_pts
+
+                result = self._estimate_motion(est_old, est_new)
+                if result is not None:
+                    vector, old_in, new_in = result
                     self.last_tracks = (old_in * self._draw_scale,
                                         new_in * self._draw_scale)
                     self.points = new_in.reshape(-1, 1, 2)
+                    self._prev_vector = vector
                 else:
-                    self.points = None  # 跟踪丢失, 下一帧重新检测
+                    # 估计不可靠 (内点占比过低), 复用上一帧向量避免抖动误报
+                    vector = self._prev_vector
+                    self.points = new_pts.reshape(-1, 1, 2)
             else:
                 self.points = None
         else:
